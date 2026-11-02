@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.DS_Store
+# local tooling
+.claude/
+# original 2k source files of the imported guns (re-download from Poly Haven; the game uses public/models/guns)
+assets/guns_src/
+# contact sheet of third-party Sketchfab thumbnails (not ours to redistribute)
+tools/gun-candidates.jpg

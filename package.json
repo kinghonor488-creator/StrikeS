@@ -1,0 +1,20 @@
+{
+  "name": "strikes",
+  "version": "1.0.0",
+  "description": "StrikeS — comic-style 5v5 defusal FPS",
+  "scripts": {
+    "dev": "vite --port 5273",
+    "build": "vite build",
+    "preview": "vite preview --port 5274"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  }
+}
