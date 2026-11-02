@@ -61,3 +61,7 @@ npm run dev
 - `src/audio/` 音效合成与混音
 
 调试：`http://localhost:5273/?debug&side=T`（或 `side=CT`、`diff=easy|normal|hard`）直接进入对局，不需要锁定鼠标。枪模预览：`http://localhost:5273/dev/guns.html?id=k47,m4`。
+
+## 许可证
+
+代码以 [MIT 许可证](LICENSE) 发布。`public/models/guns/` 下的两个枪模来自 Poly Haven，为 CC0（公共领域），不受 MIT 条款约束。
