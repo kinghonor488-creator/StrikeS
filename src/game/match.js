@@ -210,7 +210,7 @@ export class Match {
         c.scopeLevel = 0;
         c.hasBomb = false;
         c.punch.set(0, 0);
-        c.recoilIndex = 0; c.fireInacc = 0; c.landInacc = 0;
+        c.recoilIndex = 0; c.airPenalty = 0;
         c.damageBy.clear();
         c.roundKills = 0;
         c.roundKillMarks = [];

@@ -2,7 +2,7 @@
 // (spray patterns, movement/air/landing inaccuracy, recoil recovery), hitboxes.
 import * as THREE from 'three';
 import { moveBody, fits } from '../world/world.js';
-import { WEAPONS, makeWeaponState, buildGunModel, DEFAULT_PISTOL } from './weapons.js';
+import { WEAPONS, makeWeaponState, buildGunModel, DEFAULT_PISTOL, samplePattern } from './weapons.js';
 import { HumanRig } from './rig.js';
 
 // Genre-standard movement converted to metres (1 unit = 1 inch).
@@ -21,6 +21,9 @@ export const TEAMS = {
 };
 
 const D2R = Math.PI / 180;
+const LN10 = Math.LN10;
+// air / landing cone: recovery time to shed 90% of it (s)
+const AIR_RECOVER_STAND = 0.45, AIR_RECOVER_CROUCH = 0.3;
 let nextId = 1;
 
 export class Character {
@@ -51,9 +54,8 @@ export class Character {
     this.slot = 2;
     // recoil state (degrees): x = right, y = up. Bullets follow `punch`, the view shows part of it.
     this.punch = new THREE.Vector2();
-    this.recoilIndex = 0;
-    this.fireInacc = 0;
-    this.landInacc = 0;
+    this.recoilIndex = 0;     // fractional spray progress; drives the pattern AND the fire cone
+    this.airPenalty = 0;      // air / landing cone (radians)
     this.scopeLevel = 0;
     this.flinch = 0;
     this.stepPhase = 0;
@@ -140,8 +142,9 @@ export class Character {
     const wasAir = !this.onGround;
     this.onGround = res.onGround;
     if (wasAir && res.onGround) {
+      // the air cone carries into the landing, capped: hard landings keep `land`, soft ones nothing
+      this.airPenalty = res.landedSpeed > 3 ? Math.min(this.airPenalty, this.def?.spread?.land ?? 0.05) : 0;
       if (res.landedSpeed > 3) {
-        this.landInacc = this.def?.spread?.land ?? 0.05;
         if (res.landedSpeed > 9) { this.vel.x *= 0.6; this.vel.z *= 0.6; }
         this.game.onLand?.(this, res.landedSpeed);
       }
@@ -188,12 +191,41 @@ export class Character {
     const s = def.spread;
     const vmax = def.speed || MOVE.run;
     const sp = this.speed2D();
-    const moveFrac = THREE.MathUtils.clamp((sp - vmax * 0.34) / (vmax * 0.95 - vmax * 0.34), 0, 1);
+    // nothing below 34% speed, full at 95%; eased so it bites soon after the threshold
+    const lin = THREE.MathUtils.clamp((sp - vmax * 0.34) / (vmax * 0.61), 0, 1);
+    const moveFrac = lin > 0 ? lin ** (s.moveExp ?? 0.75) : 0;
     let base = (this.crouching && this.onGround) ? s.crouch : s.stand;
     if (this.scoped && s.scoped != null) base = s.scoped;
-    let v = base + s.move * moveFrac + this.fireInacc + this.landInacc;
-    if (!this.onGround) v += def.jumpAccurate && Math.abs(this.vel.y) < 1.4 ? s.air * 0.12 : s.air;
-    return v;
+    return base + s.move * moveFrac + this.fireCone() + this.airCone();
+  }
+
+  /** Spray cone: tied to the recoil index, so it grows and recovers with the pattern. */
+  fireCone() {
+    const f = this.def?.spread?.fire;
+    if (!f) return 0;
+    return (f * 3.5 + 0.004) * (1 - Math.exp(-this.recoilIndex / 3.5));
+  }
+
+  /** Air cone: the stored penalty plus a term that grows with vertical speed
+   *  (most accurate at the top of a jump, worst at take-off and in long falls). */
+  airCone() {
+    if (this.onGround) return this.airPenalty;
+    const s = this.def.spread, sj = Math.sqrt(MOVE.jump);
+    const v = THREE.MathUtils.clamp((Math.sqrt(Math.abs(this.vel.y)) - 0.25 * sj) / (0.75 * sj), 0, 2);
+    return this.airPenalty + v * s.air * 0.45;
+  }
+
+  /** Per-frame air penalty: set instantly when airborne, eases out on the ground. */
+  stepAirPenalty(dt) {
+    const s = this.def?.spread;
+    if (!s) { this.airPenalty = 0; return; }
+    if (!this.onGround) {
+      this.airPenalty = s.air * (this.def.jumpAccurate ? 0.04 : 0.55);
+    } else if (this.airPenalty > 0) {
+      const rec = this.crouching ? AIR_RECOVER_CROUCH : AIR_RECOVER_STAND;
+      this.airPenalty *= Math.exp(-LN10 * dt / rec);
+      if (this.airPenalty < 1e-4) this.airPenalty = 0;
+    }
   }
 
   switchTo(slot) {
@@ -204,7 +236,6 @@ export class Character {
     this.scopeLevel = 0;
     const w = this.weapon;
     w.drawEnd = this.game.time + (w.def.draw ?? 0.5);
-    this.fireInacc = 0;
     this.recoilIndex = 0;
     this.action = null;
     this.game.onSwitch?.(this);
@@ -277,17 +308,20 @@ export class Character {
     }
     // recovery once the trigger is released
     const r = def.recoil, s = def.spread;
+    // one shared factor: index, bullet point and fire cone fall back together, so a tap
+    // after a short pause resumes part-way down the pattern exactly where the point is
     if (r && t - this.lastShotTime > (def.cycle || 0.1) + 0.03) {
-      const k = Math.exp(-r.decay * dt);
+      const k = Math.exp(-dt / ((s?.recover ?? 0.35) * 0.45));
+      this.recoilIndex *= k;
       this.punch.multiplyScalar(k);
+      // small linear cut so the tail actually reaches zero
       const len = this.punch.length();
-      if (len > 0) this.punch.multiplyScalar(Math.max(0, len - 2.5 * dt) / len);
-      const tau = (s?.recover ?? 0.35) * 0.45;
-      this.recoilIndex *= Math.exp(-dt / tau);
-      if (this.recoilIndex < 0.05) this.recoilIndex = 0;
-      this.fireInacc *= Math.exp(-dt / tau);
+      if (len > 0) this.punch.multiplyScalar(Math.max(0, len - 1.5 * dt) / len);
+      if (this.recoilIndex < 0.05) { this.recoilIndex = 0; if (this.punch.lengthSq() < 0.01) this.punch.set(0, 0); }
+    } else if (!r) {
+      this.punch.multiplyScalar(Math.exp(-dt * 9)); // flinch on knife / utility
     }
-    this.landInacc *= Math.exp(-dt * 5);
+    this.stepAirPenalty(dt);
     this.flinch *= Math.exp(-dt * 9);
   }
 
@@ -331,16 +365,18 @@ export class Character {
       this.game.fireBullet(this, origin, this.shotDirection(inacc, def), def, i === 0, tracer && i === 0);
     }
 
-    // spray pattern: punch follows the table, step by step
+    // spray pattern: the next target sits one step further along the (fractional) index;
+    // the bullet point chases it, moving at most `approach` degrees per shot
     const r = def.recoil;
-    const idx = Math.min(Math.floor(this.recoilIndex), r.table.length - 2);
-    const a = r.table[idx], b = r.table[idx + 1];
-    const mul = this.scoped && def.scope?.scopedRecoil ? def.scope.scopedRecoil : 1;
-    this.punch.x += ((b[0] - a[0]) + (Math.random() - 0.5) * 2 * r.variance) * mul;
-    this.punch.y += ((b[1] - a[1]) + (Math.random() - 0.5) * r.variance) * mul;
     this.recoilIndex += 1;
-    // spray noise stays modest so the learnable pattern dominates
-    this.fireInacc = Math.min(this.fireInacc + (def.spread.fire || 0), (def.spread.fire || 0) * 3.5 + 0.004);
+    const p = samplePattern(r.table, this.recoilIndex);
+    const mul = this.scoped && def.scope?.scopedRecoil ? def.scope.scopedRecoil : 1;
+    const dx = (p[0] + (Math.random() - 0.5) * 2 * r.variance) * mul - this.punch.x;
+    const dy = (p[1] + (Math.random() - 0.5) * r.variance) * mul - this.punch.y;
+    const len = Math.hypot(dx, dy), lim = r.approach * mul;
+    const k = len > lim ? lim / len : 1;
+    this.punch.x += dx * k;
+    this.punch.y += dy * k;
     if (def.bolt) {
       w.boltEnd = t + def.bolt;
       this.resumeScope = this.scopeLevel;
